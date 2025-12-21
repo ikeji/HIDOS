@@ -64,10 +64,28 @@ memio_handler (x86emu_t *vm, u32 addr, u32 *val, unsigned type)
       break;
     case X86EMU_MEMIO_O | X86EMU_MEMIO_8:
     case X86EMU_MEMIO_O | X86EMU_MEMIO_8_NOPERM:
+      if (addr == 0x2F8) {
+        fprintf (stderr, "8 addr %x val %x type %x (400=io out, 1=16bit)\r\n", addr, *val, type);
+        break;
+      }
+      if (addr == 0x501) {
+        fprintf (stderr, "8 addr %x val %x type %x (400=io out, 1=16bit)\r\n", addr, *val, type);
+        x86emu_stop (vm);
+        break;
+      }
       if (addr == 0x80 && !load ())
 	break;
       goto bad;
     case X86EMU_MEMIO_O | X86EMU_MEMIO_16:
+      if (addr == 0x2F8) {
+        fprintf (stderr, "8 addr %x val %x type %x (400=io out, 1=16bit)\r\n", addr, *val, type);
+        break;
+      }
+      if (addr == 0x501) {
+        fprintf (stderr, "8 addr %x val %x type %x (400=io out, 1=16bit)\r\n", addr, *val, type);
+        x86emu_stop (vm);
+        break;
+      }
       if (addr == 0x86 && !vmio (*val << 4))
 	break;
       goto bad;

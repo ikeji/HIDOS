@@ -107,7 +107,7 @@ int
 main (int argc, char **argv)
 {
   init_common (argc, argv);
-  set_memory (mem, 0xffff0);
+  set_memory (mem, 0x1fff0);
   x86emu_t *vm = x86emu_new (0, 0);
   x86emu_set_memio_handler (vm, memio_handler);
   x86emu_reset (vm);

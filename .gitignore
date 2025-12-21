@@ -1,0 +1,8 @@
+BUILD/*.LST
+BUILD/*.OBJ
+cross/doscomm
+BUILD/BIN
+BUILD/NUL.MAP
+BUILD/*.COM
+hidosvm/disk1
+hidosvm/hidosvm

@@ -418,21 +418,11 @@ EXITP   ENDP
 CALLIO0	PROC	NEAR
 	MOV	CS:[IOAREA.IOIDX],0
 CALLIO:
-  ;      ; ---- ikejima : log
-  ;      MOV     AL, 'q'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      ; /----
 	PUSH	AX
 	MOV	AX,CS
 	INT	86H
 	POP	AX
 
-  ;      ; ---- ikejima : log
-  ;      MOV     AL, 'r'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      ; /----
 	RET
 CALLIO0	ENDP
 
@@ -817,11 +807,6 @@ INITTAB	LABEL	WORD
 	ASSUME	DS:NOTHING
 
 HWINIT:
-  ;      ; ---- ikejima : log
-  ;      MOV     AL, 'z'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      ; /----
 	MOV	AX,1000H
 	MOV	SS,AX
 	MOV	SP,1000H
@@ -835,38 +820,11 @@ HWINIT:
 	XOR	DI,DI
 	MOV	CX,OFFSET INITTAB
 	REP	MOVSB
-  ;      ; ---- ikejima : log
-  ;      PUSH    AX
-  ;      PUSH    DX
-  ;      MOV     AL, 'n'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      POP     DX
-  ;      POP     AX
-  ;      ; /----
 SEGOK:
 	;; Scan drives
 	MOV	[IOAREA.IODEV],'IN'
 	MOV	[IOAREA.IOCMD],'DI'
-  ;      ; ---- ikejima : log
-  ;      PUSH    AX
-  ;      PUSH    DX
-  ;      MOV     AL, 'o'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      POP     DX
-  ;      POP     AX
-  ;      ; /----
 	CALL	CALLIO0
-  ;      ; ---- ikejima : log
-  ;      PUSH    AX
-  ;      PUSH    DX
-  ;      MOV     AL, 'p'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      POP     DX
-  ;      POP     AX
-  ;      ; /----
 	MOV	AX,[IOAREA.IOBUF]
 	MOV	ES:[DSKNUNT.IMM],AX
 	XCHG	AX,CX
@@ -875,15 +833,6 @@ SEGOK:
 	LEA	AX,[DI+11]
 	ADD	AX,CX
 	ADD	AX,CX
-  ;      ; ---- ikejima : log
-  ;      PUSH    AX
-  ;      PUSH    DX
-  ;      MOV     AL, 'm'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      POP     DX
-  ;      POP     AX
-  ;      ; /----
 CREATE_INITTAB:
 	STOSW
 	ADD	AX,SIZE DBP
@@ -891,15 +840,6 @@ CREATE_INITTAB:
 	SUB	AX,11
 	MOV	[ENDADDR.IMM],AX
 	POP	CX
-  ;      ; ---- ikejima : log
-  ;      PUSH    AX
-  ;      PUSH    DX
-  ;      MOV     AL, 'y'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      POP     DX
-  ;      POP     AX
-  ;      ; /----
 	XOR	BX,BX
 LOAD_INITBPBS:
 	CMP	BX,CX
@@ -923,15 +863,6 @@ LOAD_INITBPBS:
 	MOV	AL,'E'
 	PUSHF
 	PUSH	CS
-  ;      ; ---- ikejima : log
-  ;      PUSH    AX
-  ;      PUSH    DX
-  ;      MOV     AL, 'x'
-  ;      MOV     DX, 2F8H
-  ;      OUT     DX, AL
-  ;      POP     DX
-  ;      POP     AX
-  ;      ; /----
 	CALL	INT29H
 HLTLOOP:
 	HLT

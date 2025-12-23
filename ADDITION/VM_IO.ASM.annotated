@@ -1,0 +1,920 @@
+; IO.SYS for a HIDOS virtual machine
+; Copyright 2022 Hideki EIRAKU <hdk_2@users.sourceforge.net>
+; Based on
+;# MS-DOS v1.25 and v2.0 Source Code
+;
+;Copyright (c) Microsoft Corporation.
+;All rights reserved.
+;
+;## MIT License.
+;
+;Permission is hereby granted, free of charge, to any person obtaining
+;a copy of this software and associated documentation files (the
+;Software), to deal in the Software without restriction, including
+;without limitation the rights to use, copy, modify, merge, publish,
+;distribute, sublicense, and/or sell copies of the Software, and to
+;permit persons to whom the Software is furnished to do so, subject to
+;the following conditions:
+;
+;The above copyright notice and this permission notice shall be
+;included in all copies or substantial portions of the Software.
+;
+;THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND,
+;EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+;MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+;NON-INFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+;BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+;ACTION OF CONTRACT,TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+;CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+;SOFTWARE.
+
+       TITLE   IO.SYS                 ; プログラムのタイトルをIO.SYSに設定
+
+; I/O system for Version 2.x of MSDOS.
+
+;This BIOS designed to be linked with the SYSINIT module provided by
+;Microsoft
+
+ANSI    EQU     0               ; ANSIエスケープシーケンスのサポートを無効化
+
+;Things needed to communicate with SYSINIT
+
+EXTRN   SYSINIT:FAR                   ; SYSINITの開始アドレスを外部参照
+EXTRN   CURRENT_DOS_LOCATION:WORD     ; SYSINIT呼び出し時のDOSの現在位置を外部参照
+EXTRN   FINAL_DOS_LOCATION:WORD       ; SYSINITがDOSを配置する最終的な位置を外部参照
+EXTRN   DEVICE_LIST:DWORD             ; デバイスリストへのポインタを外部参照
+EXTRN   MEMORY_SIZE:WORD              ; 物理メモリのサイズ（パラグラフ単位）を外部参照
+EXTRN   DEFAULT_DRIVE:BYTE            ; システム起動時に使用するデフォルトドライブを外部参照
+EXTRN   BUFFERS:BYTE                  ; デフォルトのバッファ数を外部参照
+                                      ; このままにしておくとSYSINITは2つだけ使用する
+
+CODE    SEGMENT                     ; CODEセグメントを開始
+ASSUME  CS:CODE,DS:NOTHING,ES:NOTHING,SS:NOTHING ; セグメントレジスタの前提条件を設定
+BIOSSEG	EQU	CODE                        ; BIOSSEGをCODEセグメントのエイリアスとして定義
+
+        ORG     0               ; コードの開始オフセットを0に設定
+
+IOSTRUC	STRUC                       ; IOSTRUC構造体を定義
+IODEV	DW	?		; デバイス（ディスク、コンソールなど）
+IOIDX	DW	?		; 0, 1, ...
+IOCMD	DW	?		; コマンド（読み込み、書き込みなど）
+IOBUF	DW	?,?		; 短いバッファ
+IOADR	DW	?,?		; アドレス
+IOSIZ	DW	?,?		; バイト単位の長さ
+IOSTRUC	ENDS                        ; IOSTRUC構造体の定義を終了
+
+IOAREA	LABEL	IOSTRUC             ; IOAREAにIOSTRUC構造体のラベルを割り当て
+INIT:   JMP     HWINIT              ; HWINITへジャンプ
+	ORG	OFFSET INIT + SIZE IOSTRUC ; 現在位置をINITのオフセット+IOSTRUCのサイズに設定
+
+        PAGE                        ; 次のセクションを新しいページから開始
+
+        SUBTTL  Device driver tables. ; サブタイトルを「Device driver tables.」に設定
+
+;-----------------------------------------------+
+;     DWORD pointer to next device              | 1 word offset.
+;         (-1,-1 if last device)                | 1 word segement.
+;-----------------------------------------------+
+;     Device attribute WORD                     ; 1 word.
+;       Bit 15 = 1 for chacter devices.         ;
+;                0 for Block devices.           ;
+;                                               ;
+;       Charcter devices. (Bit 15=1)            ;
+;         Bit 0 = 1  current sti device.        ;
+;         Bit 1 = 1  current sto device.        ;
+;         Bit 2 = 1  current NUL device.        ;
+;         Bit 3 = 1  current Clock device.      ;
+;                                               ;
+;         Bit 13 = 1 for non IBM machines.      ;
+;                  0 for IBM machines only.     ;
+;         Bit 14 = 1 IOCTL control bit.         ;
+;-----------------------------------------------+
+;     Device strategy pointer.                  ; 1 word offset.
+;-----------------------------------------------+
+;     Device interrupt pointer.                 ; 1 word offset.
+;-----------------------------------------------+
+;     Device name field.                        ; 8 bytes.
+;       Character devices are any valid name    ;
+;         left justified, in a space filled     ;
+;         field.                                ;
+;       Block devices contain # of units in     ;
+;         the first byte.                       ;
+;-----------------------------------------------+
+
+DEVSTART LABEL WORD                 ; デバイスヘッダリストの開始を示すラベル
+CONDEV:                         ; CONデバイスのヘッダ
+        DW      AUXDEV,BIOSSEG  ; 次のデバイスへのリンク (AUXDEV)
+IF ANSI
+        DW      8003H           ; 属性 - コンソール入出力デバイス
+ENDIF
+IFE ANSI
+	DW	8013H		; およびSPECIAL属性
+ENDIF
+        DW      STRATEGY        ; Strategyルーチンへのポインタ
+        DW      CON_INT         ; Interruptルーチンへのポインタ
+        DB      "CON     "      ; デバイス名
+
+AUXDEV:                         ; AUXデバイスのヘッダ
+        DW      PRNDEV,BIOSSEG  ; 次のデバイスへのリンク (PRNDEV)
+        DW      8000H           ; 属性
+        DW      STRATEGY        ; Strategyルーチンへのポインタ
+        DW      AUX_INT         ; Interruptルーチンへのポインタ
+        DB      "AUX     "      ; デバイス名
+
+PRNDEV:                         ; PRNデバイスのヘッダ
+        DW      TIMDEV,BIOSSEG  ; 次のデバイスへのリンク (TIMDEV)
+        DW      8000H           ; 属性
+        DW      STRATEGY        ; Strategyルーチンへのポインタ
+        DW      PRN_INT         ; Interruptルーチンへのポインタ
+        DB      "PRN     "      ; デバイス名
+
+TIMDEV:                         ; CLOCKデバイスのヘッダ
+        DW      DSKDEV,BIOSSEG  ; 次のデバイスへのリンク (DSKDEV)
+        DW      8008H           ; 属性
+        DW      STRATEGY        ; Strategyルーチンへのポインタ
+        DW      TIM_INT         ; Interruptルーチンへのポインタ
+        DB      "CLOCK   "      ; デバイス名
+
+DSKDEV:                         ; ディスクデバイスのヘッダ
+        DW      -1,-1           ; 最後のデバイス
+        DW      2000H           ; ブロックデバイスであることを示す属性
+        DW      STRATEGY        ; Strategyルーチンへのポインタ
+        DW      DSK_INT         ; Interruptルーチンへのポインタ
+DRVMAX  DB      1               ; ユニット数
+        DB      7 DUP (?)       ; 予約領域
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Dispatch tables for each device. ; サブタイトルを「Dispatch tables for each device.」に設定
+
+DSKTBL:	DW	'DI'                        ; ディスクデバイスのディスパッチテーブル識別子
+	DW      DSK_INIT        ; 0  - ドライバの初期化
+        DW      MEDIAC          ; 1  - 現在のメディアコードを返す
+        DW      GET_BPB         ; 2  - BIOSパラメータブロックを取得
+        DW      CMDERR          ; 3  - 予約（現在はエラーを返す）
+        DW      DSK_RED         ; 4  - ブロック読み込み
+        DW      BUS_EXIT        ; 5  - 未使用、ビジーフラグを返す
+        DW      EXIT            ; 6  - ステータスを返す（未使用）
+        DW      EXIT            ; 7  - 入力バッファをフラッシュ（未使用）
+        DW      DSK_WRT         ; 8  - ブロック書き込み
+        DW      DSK_WRV         ; 9  - ベリファイ付きブロック書き込み
+        DW      EXIT            ; 10 - 出力ステータスを返す
+        DW      EXIT            ; 11 - 出力バッファをフラッシュ（未使用）
+        DW      EXIT            ; 12 - IOコントロール
+
+CONTBL:	DW	'CO'                        ; コンソールデバイスのディスパッチテーブル識別子
+	DW      EXIT            ; 0  - 初期化（未使用）
+        DW      EXIT            ; 1  - メディアチェック（未使用）
+        DW      EXIT            ; 2  - BIOSパラメータブロックを取得（未使用）
+        DW      CMDERR          ; 3  - 予約（現在はエラーを返す）
+        DW      CHAR_READ       ; 4  - 文字読み込み（破壊的）
+        DW      CHAR_RDND       ; 5  - 文字読み込み（非破壊的）
+        DW      EXIT            ; 6  - ステータスを返す（未使用）
+        DW      EXIT            ; 7  - 入力バッファをフラッシュ
+        DW      CHAR_WRIT       ; 8  - 文字書き込み
+        DW      CHAR_WRIT       ; 9  - ベリファイ付き文字書き込み
+        DW      EXIT            ; 10 - 文字書き込みステータス
+        DW      EXIT            ; 11 - 出力バッファをフラッシュ（未使用）
+        DW      EXIT            ; 12 - IOコントロール
+
+AUXTBL:	DW	'AU'                        ; AUXデバイスのディスパッチテーブル識別子
+	DW      EXIT            ; 0  - 初期化（未使用）
+        DW      EXIT            ; 1  - メディアチェック（未使用）
+        DW      EXIT            ; 2  - BIOSパラメータブロックを取得（未使用）
+        DW      CMDERR          ; 3  - 予約（現在はエラーを返す）
+        DW      CHAR_READ       ; 4  - 文字読み込み（破壊的）
+        DW      CHAR_RDND       ; 5  - 文字読み込み（非破壊的）
+        DW      EXIT            ; 6  - ステータスを返す（未使用）
+        DW      EXIT            ; 7  - 入力バッファをフラッシュ
+        DW      CHAR_WRIT       ; 8  - 文字書き込み
+        DW      CHAR_WRIT       ; 9  - ベリファイ付き文字書き込み
+        DW      EXIT            ; 10 - 文字書き込みステータス
+        DW      EXIT            ; 11 - 出力バッファをフラッシュ（未使用）
+        DW      EXIT            ; 12 - IOコントロール
+
+TIMTBL:	DW	'CL'                        ; CLOCKデバイスのディスパッチテーブル識別子
+	DW      EXIT            ; 0  - 初期化（未使用）
+        DW      EXIT            ; 1  - メディアチェック（未使用）
+        DW      EXIT            ; 2  - BIOSパラメータブロックを取得（未使用）
+        DW      CMDERR          ; 3  - 予約（現在はエラーを返す）
+        DW      TIM_RED         ; 4  - 文字読み込み（破壊的）
+        DW      BUS_EXIT        ; 5  - 未使用、ビジーフラグを返す
+        DW      EXIT            ; 6  - ステータスを返す（未使用）
+        DW      EXIT            ; 7  - 入力バッファをフラッシュ（未使用）
+        DW      TIM_WRT         ; 8  - 文字書き込み
+        DW      TIM_WRT         ; 9  - ベリファイ付き文字書き込み
+        DW      EXIT            ; 10 - 文字書き込みステータス（未使用）
+        DW      EXIT            ; 11 - 出力バッファをフラッシュ（未使用）
+        DW      EXIT            ; 12 - IOコントロール
+
+PRNTBL:	DW	'PR'                        ; PRNデバイスのディスパッチテーブル識別子
+	DW      EXIT            ; 0  - 未使用
+        DW      EXIT            ; 1  - 未使用
+        DW      EXIT            ; 2  - ブロック（未使用）
+        DW      CMDERR          ; 3  - 予約（現在はエラーを返す）
+        DW      EXIT            ; 4  - 未使用
+        DW      BUS_EXIT        ; 5  - 未使用、ビジーフラグを返す
+        DW      EXIT            ; 6  - 未使用
+        DW      EXIT            ; 7  - 未使用
+        DW      CHAR_WRIT       ; 8  - 文字書き込み
+        DW      CHAR_WRIT       ; 9  - ベリファイ付き文字書き込み
+        DW      EXIT            ; 10 - 文字書き込みステータス
+        DW      EXIT            ; 11 - 未使用
+        DW      EXIT            ; 12 - IOコントロール
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Strategy and Software Interrupt routines. ; サブタイトルを「Strategy and Software Interrupt routines.」に設定
+
+;Define offsets for io data packet
+
+IODAT   STRUC                       ; IODAT構造体を定義
+CMDLEN  DB      ?               ; このコマンドの長さ
+UNIT    DB      ?               ; サブユニット指定子
+CMD     DB      ?               ; コマンドコード
+STATUS  DW      ?               ; ステータス
+        DB      8 DUP (?)       ; 予約領域
+MEDIA   DB      ?               ; メディアディスクリプタ
+TRANS   DD      ?               ; 転送アドレス
+COUNT   DW      ?               ; ブロックまたは文字数
+START   DW      ?               ; 転送を開始する最初のブロック
+IODAT   ENDS                        ; IODAT構造体の定義を終了
+
+PTRSAV  DD      0               ; Strategyポインタの保存領域
+
+;
+; Simplistic Strategy routine for non-multi-Tasking system.
+;
+;   Currently just saves I/O packet pointers in PTRSAV for
+;   later processing by the individual interrupt routines.
+;
+
+STRATP  PROC    FAR                 ; STRATPプロシージャを開始 (FAR)
+
+STRATEGY:                           ; Strategyルーチンのエントリポイント
+        MOV     WORD PTR CS:[PTRSAV],BX ; I/Oパケットのオフセットポインタを保存
+        MOV     WORD PTR CS:[PTRSAV+2],ES ; I/Oパケットのセグメントポインタを保存
+        RET                         ; 呼び出し元に戻る
+
+STRATP  ENDP                        ; STRATPプロシージャを終了
+
+	PUBLIC RE_INIT                 ; RE_INITを公開シンボルとして宣言
+RE_INIT	PROC	FAR                     ; RE_INITプロシージャを開始 (FAR)
+	PUSH	BX                      ; BXレジスタをスタックに保存
+	PUSH	DS                      ; DSレジスタをスタックに保存
+	XOR	BX,BX                   ; BXをゼロクリア
+	MOV	DS,BX                   ; DSを0に設定（割り込みベクタテーブルにアクセスするため）
+	MOV	BX,28H*4                ; INT 28HのベクタアドレスをBXに設定
+	PUSH	DS:[BX]                 ; 元のINT 28Hのオフセットをスタックに保存
+	PUSH	DS:[BX+2]               ; 元のINT 28Hのセグメントをスタックに保存
+	POP	CS:[ORIG28H+2]          ; 元のセグメントをORIG28Hに保存
+	POP	CS:[ORIG28H]            ; 元のオフセットをORIG28Hに保存
+	MOV	WORD PTR DS:[BX],OFFSET INT28H ; INT 28Hのベクタを新しいハンドラに設定
+	MOV	DS:[BX+2],CS            ; 新しいハンドラのセグメントを設定
+	POP	DS                      ; DSレジスタを復元
+	POP	BX                      ; BXレジスタを復元
+	RET                         ; 呼び出し元に戻る
+RE_INIT	ENDP                        ; RE_INITプロシージャを終了
+
+INT28H:                             ; INT 28Hハンドラ
+	MOV	CS:[IOAREA.IODEV],'CO'  ; デバイスをコンソールに設定
+	MOV	CS:[IOAREA.IOCMD],'RW'  ; コマンドを読み書きに設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行
+	DB	0EAH                    ; JMP FAR命令のオペコード
+ORIG28H	DW	?,?                 ; 元のINT 28Hベクタの保存領域
+
+;
+; Console interrupt routine for processing I/O packets.
+;
+
+CON_INT:                            ; コンソール割り込みルーチン
+        PUSH    SI                  ; SIレジスタをスタックに保存
+        MOV     SI,OFFSET CONTBL    ; SIにコンソールディスパッチテーブルのアドレスを設定
+        JMP     SHORT ENTRY         ; 共通エントリポイントへジャンプ
+
+;
+; Auxilary interrupt routine for processing I/O packets.
+;
+
+AUX_INT:                            ; AUX割り込みルーチン
+        PUSH    SI                  ; SIレジスタをスタックに保存
+        MOV     SI,OFFSET AUXTBL    ; SIにAUXディスパッチテーブルのアドレスを設定
+        JMP     SHORT ENTRY         ; 共通エントリポイントへジャンプ
+
+;
+; Printer interrupt routine for processing I/O packets.
+;
+
+PRN_INT:                            ; プリンタ割り込みルーチン
+        PUSH    SI                  ; SIレジスタをスタックに保存
+        MOV     SI,OFFSET PRNTBL    ; SIにプリンタディスパッチテーブルのアドレスを設定
+        JMP     SHORT ENTRY         ; 共通エントリポイントへジャンプ
+
+;
+; Clock interrupt routine for processing I/O packets.
+;
+
+TIM_INT:                            ; クロック割り込みルーチン
+        PUSH    SI                  ; SIレジスタをスタックに保存
+        MOV     SI,OFFSET TIMTBL    ; SIにクロックディスパッチテーブルのアドレスを設定
+        JMP     SHORT ENTRY         ; 共通エントリポイントへジャンプ
+
+;
+; Disk interrupt routine for processing I/O packets.
+;
+
+DSK_INT:                            ; ディスク割り込みルーチン
+        PUSH    SI                  ; SIレジスタをスタックに保存
+        MOV     SI,OFFSET DSKTBL    ; SIにディスクディスパッチテーブルのアドレスを設定
+
+;
+; Common program for handling the simplistic I/O packet
+;   processing scheme in MSDOS 2.0
+;
+
+ENTRY:  PUSH    AX              ; 必要なレジスタをすべて保存
+        PUSH    CX              ; CXレジスタをスタックに保存
+        PUSH    DX              ; DXレジスタをスタックに保存
+        PUSH    DI              ; DIレジスタをスタックに保存
+        PUSH    BP              ; BPレジスタをスタックに保存
+        PUSH    DS              ; DSレジスタをスタックに保存
+        PUSH    ES              ; ESレジスタをスタックに保存
+        PUSH    BX              ; BXレジスタをスタックに保存
+	CLD                     ; ディレクションフラグをクリア
+	LODS	WORD PTR CS:[SI]    ; SIが指すテーブルからデバイス識別子をロード
+	MOV	CS:[IOAREA.IODEV],AX    ; デバイス識別子をIOAREAに保存
+
+        LDS     BX,CS:[PTRSAV]  ; I/Oパケットへのポインタを取得
+
+        MOV     AL,[BX.UNIT]    ; ALにユニットコードをロード
+        MOV     AH,[BX.MEDIA]   ; AHにメディアディスクリプタをロード
+        MOV     CX,[BX.COUNT]   ; CXにバイト/セクタ数をロード
+        MOV     DX,[BX.START]   ; DXに開始論理セクタをロード
+
+        XCHG    DI,AX           ; ユニットとメディアを一時的にDIに退避
+        MOV     AL,[BX.CMD]     ; コマンドタイプを取得 (1-11)
+        XOR     AH,AH           ; AXの上位半分をクリア
+        ADD     SI,AX           ; ディスパッチテーブルのエントリポインタを計算
+        ADD     SI,AX           ; (コマンド番号 * 2)
+        CMP     AL,11           ; コマンドが11以下か検証
+        JA      CMDERR          ; 範囲外ならエラーへ
+        XCHG    AX,DI           ; ユニットとメディアをAXに戻す
+        LES     DI,[BX.TRANS]   ; 転送アドレスをES:DIにロード
+                                ;ES contains segment.
+        PUSH    CS              ; CSをスタックにプッシュ
+        POP     DS              ; DSをCSと同じに設定
+	ASSUME	DS:CODE             ; DSがCODEセグメントを指すことをアセンブラに伝える
+        JMP     [SI]            ; I/Oパケットコマンドを実行
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Common error and exit points. ; サブタイトルを「Common error and exit points.」に設定
+
+BUS_EXIT:                       ; デバイスビジー時の終了処理
+        MOV     AH,00000011B    ; ビジーと完了ビットをセット
+        JMP     SHORT EXIT1     ; 共通の終了処理1へジャンプ
+
+CMDERR: MOV     AL,3            ; 不明なコマンドエラー番号を設定
+
+;
+;  Common error processing routine.
+;   AL contains actual error code.
+;
+;   Error # 0 = Write Protect violation.
+;           1 = Unkown unit.
+;           2 = Drive not ready.
+;           3 = Unknown command in I/O packet.
+;           4 = CRC error.
+;           5 = Bad drive request structure length.
+;           6 = Seek error.
+;           7 = Unknown media discovered.
+;           8 = Sector not found.
+;           9 = Printer out of paper.
+;          10 = Write fault.
+;          11 = Read fault.
+;          12 = General failure.
+;
+
+ERR_EXIT:                           ; エラー終了処理
+        MOV     AH,10000001B    ; エラーと完了ビットをセット
+        STC                     ; キャリービットをセット
+        JMP     SHORT EXIT1     ; 共通の終了処理1へジャンプ
+
+EXITP   PROC    FAR             ; デバイスドライバの通常終了プロシージャ
+
+EXIT:   MOV     AH,00000001B    ; MSDOS用に完了ビットをセット
+EXIT1:  LDS     BX,CS:[PTRSAV]  ; I/Oパケットへのポインタを取得
+        MOV     [BX.STATUS],AX  ; 操作完了とステータスを保存
+
+        POP     BX              ; レジスタを復元
+        POP     ES              ; ESレジスタをスタックから復元
+        POP     DS              ; DSレジスタをスタックから復元
+        POP     BP              ; BPレジスタをスタックから復元
+        POP     DI              ; DIレジスタをスタックから復元
+        POP     DX              ; DXレジスタをスタックから復元
+        POP     CX              ; CXレジスタをスタックから復元
+        POP     AX              ; AXレジスタをスタックから復元
+        POP     SI              ; SIレジスタをスタックから復元
+        RET                             ; レジスタを復元してリターン
+EXITP   ENDP                        ; EXITPプロシージャを終了
+
+CALLIO0	PROC	NEAR                ; CALLIO0プロシージャを開始 (NEAR)
+	MOV	CS:[IOAREA.IOIDX],0 ; デバイスインデックスを0に設定
+CALLIO:                             ; CALLIOエントリポイント
+	PUSH	AX                      ; AXレジスタをスタックに保存
+	MOV	AX,CS                   ; AXに現在のコードセグメントを設定
+	INT	86H                     ; 仮想マシンI/O割り込みを呼び出し
+	POP	AX                      ; AXレジスタを復元
+
+	RET                         ; 呼び出し元に戻る
+CALLIO0	ENDP                        ; CALLIO0プロシージャを終了
+
+STORADR	PROC	NEAR                ; STORADRプロシージャを開始 (NEAR)
+	PUSH	BP                      ; BPレジスタをスタックに保存
+	MOV	BP,SP                   ; BPにスタックポインタをコピー
+	PUSH	AX                      ; AXレジスタをスタックに保存
+	PUSH	DX                      ; DXレジスタをスタックに保存
+	MOV	AX,16                   ; AXに16を設定
+	MUL	WORD PTR [BP+6]         ; セグメント値を16倍して物理アドレスを計算
+	ADD	AX,[BP+4]               ; オフセットを加算
+	ADC	DX,0                    ; 上位ワードに桁上がりを加算
+	MOV	[IOAREA.IOADR+0],AX     ; 計算したアドレスの下位ワードをIOAREAに保存
+	MOV	[IOAREA.IOADR+2],DX     ; 計算したアドレスの上位ワードをIOAREAに保存
+	POP	DX                      ; DXレジスタを復元
+	POP	AX                      ; AXレジスタを復元
+	POP	BP                      ; BPレジスタを復元
+	RET	4                       ; リターンし、スタックから引数（4バイト）をクリーンアップ
+STORADR	ENDP                        ; STORADRプロシージャを終了
+
+	PAGE                        ; 次のセクションを新しいページから開始
+	SUBTTL	Character device I/O section. ; サブタイトルを「Character device I/O section.」に設定
+
+CHARSTAT:                           ; 文字デバイスのステータスチェック
+	MOV	[IOAREA.IOCMD],'RP'     ; コマンドを「Read Poll」に設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行
+	MOV	AX,[IOAREA.IOBUF]       ; 結果をAXに取得
+	TEST	AX,AX                   ; AXが0かテスト（ゼロフラグを設定）
+	RET                         ; 呼び出し元に戻る
+
+CHARREAD:                           ; 1文字読み込み
+	MOV	[IOAREA.IOCMD],'R1'     ; コマンドを「Read 1 char」に設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行
+	MOV	AX,[IOAREA.IOBUF]       ; 読み込んだ文字をAXに取得
+	RET                         ; 呼び出し元に戻る
+
+CHARINP:                            ; 文字入力（文字が来るまで待つ）
+	CALL	CHARSTAT                ; 入力ステータスをチェック
+	JE	CHARINP                 ; 文字がなければループ
+	CALL	CHARREAD                ; 文字を読み込む
+	RET                         ; 呼び出し元に戻る
+
+CHAR_RDND:                          ; 非破壊的な文字読み込み
+	CALL	CHARSTAT                ; 入力ステータスをチェック
+	JE	CHAR_RDND1              ; 文字がなければビジーで終了
+        LDS     BX,CS:[PTRSAV]      ; I/Oパケットへのポインタを取得
+        MOV     [BX.MEDIA],AL       ; 読み込んだ文字をメディアバイトとして保存
+        JMP     EXIT                ; 正常終了
+CHAR_RDND1:                         ;
+        JMP     BUS_EXIT            ; ビジー終了
+
+CHAR_READ:                          ; 文字列の読み込み
+	CALL	CHARINP                 ; 1文字入力
+	STOSB                       ; ES:DIが指す場所に文字を格納し、DIをインクリメント
+	LOOP	CHAR_READ               ; CXが0になるまでループ
+        JMP     EXIT                ; 正常終了
+
+CHAR_WRIT:                          ; 文字列の書き込み
+	XOR	AX,AX                   ; AXをゼロクリア
+	MOV	[IOAREA.IOIDX],AX       ; デバイスインデックスを0に設定
+	MOV	[IOAREA.IOCMD],'WR'     ; コマンドを「Write」に設定
+	PUSH	ES                      ; ESレジスタをスタックにプッシュ
+	PUSH	DI                      ; DIレジスタをスタックにプッシュ
+	CALL	STORADR                 ; 転送元アドレスを設定
+	MOV	[IOAREA.IOSIZ+0],CX     ; 書き込むバイト数を設定
+	MOV	[IOAREA.IOSIZ+2],AX     ; 書き込むバイト数（上位）を設定
+	CALL	CALLIO                  ; I/O呼び出しを実行
+        JMP     EXIT                ; 正常終了
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Main console I/O section. ; サブタイトルを「Main console I/O section.」に設定
+
+INT29H:                             ; 高速コンソール出力割り込みハンドラ
+	MOV	CS:[IOAREA.IODEV],'CO'  ; デバイスをコンソールに設定
+	MOV	CS:[IOAREA.IOCMD],'W1'  ; コマンドを「Write 1 char」に設定
+	MOV	CS:[IOAREA.IOBUF],AX    ; 書き込む文字をバッファに設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行
+	IRET                        ; 割り込みから復帰
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Date/Time Routines. ; サブタイトルを「Date/Time Routines.」に設定
+
+TIM	STRUC                       ; TIM構造体を定義
+TIM_DAYS  DW    ?               ; 1980/1/1からの日数
+TIM_MINS  DB    ?               ; 分
+TIM_HRS   DB    ?               ; 時
+TIM_HSEC  DB    ?               ; 1/100秒
+TIM_SECS  DB    ?               ; 秒
+TIM	ENDS                        ; TIM構造体の定義を終了
+
+;
+; Time write routine.
+;
+
+TIM_WRT:                            ; 時刻書き込みルーチン
+	CMP	CX,6                    ; 書き込むデータ長が6バイトかチェック
+	JAE	TIM_WRT1                ; 6バイト以上なら処理を続行
+	MOV	AL,10                   ; エラーコード10（書き込みフォールト）を設定
+	JMP	ERR_EXIT                ; エラー終了
+TIM_WRT1:                           ;
+	MOV	AL,ES:[DI.TIM_HSEC]     ; 1/100秒を取得
+	CBW                         ; ALをAXに符号拡張
+	MOV	CX,10000                ; 10000を設定
+	MUL	CX		; マイクロ秒に変換
+	PUSH	DX                      ; 結果の上位ワードをスタックに保存
+	PUSH	AX                      ; 結果の下位ワードをスタックに保存
+	MOV	AL,ES:[DI.TIM_HRS]      ; 時を取得
+	MOV	CX,60                   ; 60を設定
+	MUL	CL                      ; 分に変換
+	XCHG	AX,BX                   ; 結果をBXに退避
+	MOV	AL,ES:[DI.TIM_MINS]     ; 分を取得
+	CBW                         ; ALをAXに符号拡張
+	ADD	AX,BX                   ; 時から計算した分を加算
+	MUL	CX                      ; 秒に変換
+	XCHG	AX,BX                   ; 結果をBXに退避
+	MOV	AL,ES:[DI.TIM_SECS]     ; 秒を取得
+	CBW                         ; ALをAXに符号拡張
+	ADD	AX,BX                   ; 分から計算した秒を加算
+	ADC	DX,0                    ; 桁上がりをDXに加算
+	PUSH	DX                      ; 結果の上位ワードをスタックに保存
+	PUSH	AX                      ; 結果の下位ワードをスタックに保存
+	MOV	AX,3652		; 1970/1/1から1980/1/1までの日数
+	CWD                         ; AXをDX:AXに符号拡張
+	ADD	AX,ES:[DI.TIM_DAYS]     ; 1980/1/1からの日数を加算
+	PUSH	DX                      ; 結果の上位ワードをスタックに保存
+	PUSH	AX                      ; 結果の下位ワードをスタックに保存
+	MOV	[IOAREA.IOIDX],DX       ; I/Oインデックスを設定（未使用）
+	MOV	[IOAREA.IOCMD],'WR'     ; コマンドを「Write」に設定
+	MOV	CX,SP                   ; スタックポインタをCXに設定
+	PUSH	SS                      ; スタックセグメントをプッシュ
+	PUSH	CX                      ; スタックオフセットをプッシュ
+	CALL	STORADR                 ; アドレスを設定
+	MOV	[IOAREA.IOSIZ+0],12     ; 書き込むサイズを12バイトに設定
+	MOV	[IOAREA.IOSIZ+2],DX     ; 書き込むサイズの上位ワードを設定
+	CALL	CALLIO                  ; I/O呼び出しを実行
+	ADD	SP,12                   ; スタックポインタを調整
+        JMP     EXIT                ; 正常終了
+
+;
+; Time read routine.
+;
+
+TIM_RED:                            ; 時刻読み込みルーチン
+	CMP	CX,6                    ; 要求されたデータ長が6バイトかチェック
+	JAE	TIM_RED1                ; 6バイト以上なら処理を続行
+	MOV	AL,11                   ; エラーコード11（読み込みフォールト）を設定
+	JMP	ERR_EXIT                ; エラー終了
+TIM_RED1:                           ;
+	SUB	SP,12                   ; スタックに12バイトの領域を確保
+	XOR	AX,AX                   ; AXをゼロクリア
+	MOV	[IOAREA.IOIDX],AX       ; デバイスインデックスを0に設定
+	MOV	[IOAREA.IOCMD],'RD'     ; コマンドを「Read」に設定
+	MOV	CX,SP                   ; スタックポインタをCXに設定
+	PUSH	SS                      ; スタックセグメントをプッシュ
+	PUSH	CX                      ; スタックオフセットをプッシュ
+	CALL	STORADR                 ; アドレスを設定
+	MOV	[IOAREA.IOSIZ+0],12     ; 読み込むサイズを12バイトに設定
+	MOV	[IOAREA.IOSIZ+2],AX     ; 読み込むサイズの上位ワードを設定
+	CALL	CALLIO                  ; I/O呼び出しを実行
+	POP	AX                      ; 日数の下位ワードを取得
+	POP	DX                      ; 日数の上位ワードを取得
+	SUB	AX,3652                 ; 1980/1/1からの日数に変換
+	MOV	ES:[DI.TIM_DAYS],AX     ; 日数を保存
+	POP	AX                      ; 秒の下位ワードを取得
+	POP	DX                      ; 秒の上位ワードを取得
+	MOV	CX,60                   ; 60を設定
+	DIV	CX                      ; 秒を60で割り、分と秒を計算
+	MOV	ES:[DI.TIM_SECS],DL     ; 秒を保存
+	DIV	CL                      ; 分を60で割り、時と分を計算
+	MOV	ES:[DI.TIM_MINS],AH     ; 分を保存
+	MOV	ES:[DI.TIM_HRS],AL      ; 時を保存
+	POP	AX                      ; マイクロ秒の下位ワードを取得
+	POP	DX                      ; マイクロ秒の上位ワードを取得
+	MOV	CX,10000                ; 10000を設定
+	DIV	CX                      ; マイクロ秒を10000で割り、1/100秒を計算
+	MOV	ES:[DI.TIM_HSEC],AL     ; 1/100秒を保存
+        JMP     EXIT                ; 正常終了
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Drive Tables.       ; サブタイトルを「Drive Tables.」に設定
+
+
+;
+; MSDOS drive initialization tables and other what not.
+;
+
+DBP     STRUC                       ; DBP (Drive Parameter Block) 構造体を定義
+
+JMPNEAR DB      3 DUP (?)       ; ブート用のJMP NEAR命令
+NAMEVER DB      8 DUP (?)       ; OSの名前/バージョン
+
+;-------  Start of Drive Parameter Block.
+
+SECSIZE DW      ?               ; セクタサイズ（バイト）
+ALLOC   DB      ?               ; アロケーションブロックあたりのセクタ数
+RESSEC  DW      ?               ; 予約セクタ数
+FATS    DB      ?               ; FATの数
+MAXDIR  DW      ?               ; ルートディレクトリのエントリ数
+SECTORS DW      ?               ; ディスクあたりの総セクタ数
+MEDIAID DB      ?               ; メディアIDバイト
+FATSEC  DW      ?               ; FATあたりのセクタ数
+
+;-------  End of Drive Parameter Block.
+
+SECTRK  DW      ?               ; トラックあたりのセクタ数
+NHEADS	DW	?		; ヘッド数
+
+DBP     ENDS                        ; DBP構造体の定義を終了
+
+MOVIMM	STRUC                       ; MOVIMM構造体を定義
+	DB	?                   ; オペコード
+IMM	DW	?                   ; 即値
+MOVIMM	ENDS                        ; MOVIMM構造体の定義を終了
+
+DSK_INIT:                           ; ディスク初期化ルーチン
+DSKNUNT	LABEL	MOVIMM              ; DSKNUNTラベル（MOV AX, imm）
+	MOV	AX,1                    ; AXに1をロード
+	MOV	SI,OFFSET INITTAB       ; SIに初期化テーブルのアドレスを設定
+        JMP     SHORT GET_BP5       ; GET_BP5へジャンプ
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Media check routine ; サブタイトルを「Media check routine」に設定
+
+;
+; Media check routine.
+; On entry:
+;       AL = disk unit number.
+;       AH = media byte
+; On exit:
+;
+;       [MEDIA FLAG] = -1 (FF hex) if disk is changed.
+;       [MEDIA FLAG] = 0 if don't know.
+;       [MEDIA FLAG] = 1 if not changed.
+;
+
+MEDIAS  STRUC                       ; MEDIAS構造体を定義
+        DB      13 DUP(?)               ; 静的リクエストヘッダ
+MEDIAS1 DB      ?                       ; メディアバイト
+MEDIAS2 DB      ?                       ; メディアステータスバイトフラグ
+MEDIAS  ENDS                        ; MEDIAS構造体の定義を終了
+
+MEDIAC:                             ; メディアチェックルーチン
+	CBW                         ; ALをAXに符号拡張（ユニット番号）
+	MOV	[IOAREA.IOIDX],AX       ; デバイスインデックスを設定
+	MOV	[IOAREA.IOCMD],'CH'     ; コマンドを「Check」に設定
+	CALL	CALLIO                  ; I/O呼び出しを実行
+	MOV	AX,[IOAREA.IOBUF]       ; 結果をAXに取得
+	MOV	AH,AL                   ; 結果をAHにコピー
+	MOV	AL,0                    ; ALを0に設定
+MEDIA1: LDS     BX,[PTRSAV]     ; データブロックのメディアセクションを更新
+        MOV     [BX.MEDIAS2],AH     ; メディアステータスフラグを保存
+        JMP     EXIT                ; 正常終了
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Build and return Bios Parameter Block for a diskette. ; サブタイトルを設定
+
+;
+; Build Bios Parameter Blocks.
+;
+;       On entry:  ES:DI contains the address of a scratch sector buffer.
+;                  AL = Unit number.
+;                  AH = Current media byte.
+;
+;       On exit:   Return a DWORD pointer to the associated BPB
+;                  in the Request packet.
+;
+
+BPBS    STRUC                       ; BPBS構造体を定義
+        DB      13 DUP(?)               ; 静的リクエストヘッダ
+BPB1    DB      ?                       ; メディアバイト
+BPB2    DW      ?                       ; DWORD転送アドレス
+        DW      ?
+BPB3    DW      ?                       ; BPBへのDWORDポインタ
+        DW      ?
+BPBS    ENDS                        ; BPBS構造体の定義を終了
+
+GET_BPB:                            ; BIOSパラメータブロック取得ルーチン
+	CBW                         ; ALをAXに符号拡張（ユニット番号）
+	MOV	[IOAREA.IOIDX],AX       ; デバイスインデックスを設定
+	ADD	AX,AX                   ; AXを2倍（インデックス計算）
+	XCHG	AX,BX                   ; AXとBXを交換
+	MOV	SI,[OFFSET INITTAB+BX]  ; 初期化テーブルからBPBポインタを取得
+	LEA	SI,[SI-11]              ; BPBの先頭アドレスを計算
+	XOR	AX,AX                   ; AXをゼロクリア
+	MOV	[IOAREA.IOCMD],'RD'     ; コマンドを「Read」に設定
+	MOV	[IOAREA.IOBUF+0],AX     ; バッファをゼロクリア
+	MOV	[IOAREA.IOBUF+2],AX     ; バッファをゼロクリア
+	MOV	[IOAREA.IOSIZ+0],SIZE DBP ; 読み込むサイズをDBPのサイズに設定
+	MOV	[IOAREA.IOSIZ+2],AX     ; 読み込むサイズの上位ワードを設定
+	PUSH	CS                      ; CSをスタックにプッシュ
+	PUSH	SI                      ; SIをスタックにプッシュ
+	CALL	STORADR                 ; アドレスを設定
+	CALL	CALLIO                  ; I/O呼び出しを実行
+	CMP	[IOAREA.IOBUF+0],AX     ; 結果が0か比較
+	JE	GET_BP6                 ; 0ならエラーへ
+GET_BP4:MOV     AL,[SI.MEDIAID]     ; メディアIDを取得
+        ADD     SI,11           ; DPBポインタに変換
+
+GET_BP5:LDS     BX,[PTRSAV]     ; I/Oデータパケットを更新
+        MOV     [BX.BPB1],AL    ; メディアバイト
+        MOV     [BX.BPB3],SI    ; DPBポインタ（オフセット）
+        MOV     [BX.BPB3+2],CS  ; DPBポインタ（セグメント）
+	OR	AH,AH                   ; AHが0かチェック
+	JNZ	GET_BP6                 ; 0でなければエラーへ
+	MOV	AL,0                    ; ALを0に設定
+	JMP     EXIT                ; 正常終了
+GET_BP6:MOV	AX,7                    ; エラーコード7（不明なメディア）を設定
+	JMP	ERR_EXIT                ; エラー終了
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  MSDOS 2.x Disk I/O drivers. ; サブタイトルを設定
+
+;
+; Disk READ/WRITE functions.
+;
+; On entry:
+;       AL = Disk I/O driver number
+;       AH = Media byte.
+;       ES = Disk transfer segment.
+;       DI = Disk transfer offset in ES.
+;       CX = Number of sectors to transfer
+;       DX = Logical starting sector.
+;
+; On exit:
+;       Normal exit through common exit routine.
+;
+;       Abnormal exit through common error routine.
+;
+
+DSK_RED:                            ; ディスク読み込みルーチン
+	MOV	BX,'RD'                 ; コマンドを「Read」に設定
+        JMP     SHORT DSK_COM       ; 共通処理へジャンプ
+DSK_WRV:                            ; ベリファイ付きディスク書き込み
+DSK_WRT:MOV	BX,'WR'                 ; コマンドを「Write」に設定
+
+DSK_COM:                            ; ディスクI/O共通処理
+	CBW                         ; ALをAXに符号拡張（ユニット番号）
+	MOV	[IOAREA.IOIDX],AX       ; デバイスインデックスを設定
+	MOV	[IOAREA.IOCMD],BX       ; コマンドを設定
+	ADD	AX,AX                   ; AXを2倍（インデックス計算）
+	XCHG	AX,BX                   ; AXとBXを交換
+	MOV	BX,[OFFSET INITTAB+BX]  ; 初期化テーブルからBPBポインタを取得
+	MOV	AX,[BX]		; SECSIZEを取得
+	PUSH	AX                      ; セクタサイズをスタックに保存
+	MUL	DX                      ; 開始セクタからバイトオフセットを計算
+	MOV	[IOAREA.IOBUF+0],AX     ; バイトオフセットの下位ワードを設定
+	MOV	[IOAREA.IOBUF+2],DX     ; バイトオフセットの上位ワードを設定
+	POP	AX                      ; セクタサイズを復元
+	MUL	CX                      ; 転送バイト数を計算
+	MOV	[IOAREA.IOSIZ+0],AX     ; 転送サイズの下位ワードを設定
+	MOV	[IOAREA.IOSIZ+2],DX     ; 転送サイズの上位ワードを設定
+	PUSH	ES                      ; ESをスタックにプッシュ
+	PUSH	DI                      ; DIをスタックにプッシュ
+	CALL	STORADR                 ; データ転送アドレスを設定
+	CALL	CALLIO                  ; I/O呼び出しを実行
+	XOR	AX,AX                   ; AXをゼロクリア
+	CMP	[IOAREA.IOBUF+0],AX     ; 結果が0か比較
+	JE	DERROR                  ; 0ならディスクエラーへ
+        JMP	EXIT                    ; 全て完了、正常終了
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Disk Error processing. ; サブタイトルを設定
+
+;
+; Disk error routine.
+;
+
+DERROR: LDS     BX,CS:[PTRSAV]      ; I/Oパケットへのポインタを取得
+        MOV     [BX.COUNT],0        ; 転送カウントを0に設定
+        PUSH    CS                  ; CSをスタックにプッシュ
+        POP     DS                  ; DSをCSと同じに設定
+	MOV	AL,8                    ; エラーコード8（セクタが見つからない）を設定
+	JMP	ERR_EXIT                ; エラー終了
+
+        PAGE                        ; 次のセクションを新しいページから開始
+        SUBTTL  Initalization code and temporary work areas. ; サブタイトルを設定
+
+;
+; Overlayed by MSDOS by SYSINIT.
+;
+INITTAB	LABEL	WORD                ; 初期化テーブルのラベル
+	ASSUME	DS:NOTHING              ; DSの前提条件をクリア
+
+HWINIT:                             ; ハードウェア初期化エントリポイント
+	MOV	AX,1000H                ; AXに1000Hを設定
+	MOV	SS,AX                   ; スタックセグメントを設定
+	MOV	SP,1000H                ; スタックポインタを設定
+	CLD                         ; ディレクションフラグをクリア
+	ASSUME	DS:CODE,ES:CODE         ; DSとESがCODEを指すことを前提とする
+	MOV	AX,CODE                 ; AXにCODEセグメントのアドレスを設定
+	MOV	ES,AX                   ; ESにCODEセグメントのアドレスを設定
+	MOV	AX,CS                   ; AXに現在のコードセグメントを設定
+	MOV	DS,AX                   ; DSに現在のコードセグメントを設定
+	XOR	SI,SI                   ; SIをゼロクリア
+	XOR	DI,DI                   ; DIをゼロクリア
+	MOV	CX,OFFSET INITTAB       ; CXに初期化コードのサイズを設定
+	REP	MOVSB                   ; 初期化コードを自身の上にコピー（再配置）
+SEGOK:                              ;
+	;; Scan drives
+	MOV	[IOAREA.IODEV],'IN'     ; デバイスを「Init」に設定
+	MOV	[IOAREA.IOCMD],'DI'     ; コマンドを「Disk Info」に設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行（ディスク数を問い合わせ）
+	MOV	AX,[IOAREA.IOBUF]       ; ディスク数をAXに取得
+	MOV	ES:[DSKNUNT.IMM],AX     ; ディスク数をDSK_INIT命令の即値部に保存
+	XCHG	AX,CX                   ; ディスク数をCXに移動
+	PUSH	CX                      ; ディスク数をスタックに保存
+	MOV	DI,OFFSET INITTAB       ; DIに初期化テーブルのオフセットを設定
+	LEA	AX,[DI+11]              ; AXにBPBの格納先アドレスを計算
+	ADD	AX,CX                   ; ディスク数 * 2 を加算
+	ADD	AX,CX                   ; (INITTABのエントリはワードなため)
+CREATE_INITTAB:                     ;
+	STOSW                       ; AXをES:DIに書き込み、DIをインクリメント
+	ADD	AX,SIZE DBP             ; 次のBPBの格納先アドレスを計算
+	LOOP	CREATE_INITTAB          ; 全ディスク分ループ
+	SUB	AX,11                   ; AXを調整
+	MOV	[ENDADDR.IMM],AX        ; 最終アドレスを保存
+	POP	CX                      ; ディスク数を復元
+	XOR	BX,BX                   ; BXをゼロクリア（ディスクインデックス）
+LOAD_INITBPBS:                      ;
+	CMP	BX,CX                   ; 全ディスクを処理したか比較
+	JAE	LOAD_INITBPBS_DONE      ; 処理済みなら完了へ
+	XOR	AX,AX                   ; AXをゼロクリア
+	MOV	[IOAREA.IODEV],'DI'     ; デバイスを「Disk」に設定
+	MOV	[IOAREA.IOIDX],BX       ; ディスクインデックスを設定
+	MOV	[IOAREA.IOCMD],'RD'     ; コマンドを「Read」に設定
+	MOV	[IOAREA.IOBUF+0],AX     ; オフセットを0に設定
+	MOV	[IOAREA.IOBUF+2],AX     ; オフセットを0に設定
+	MOV	[IOAREA.IOSIZ+0],SIZE DBP ; 読み込むサイズをDBPのサイズに設定
+	MOV	[IOAREA.IOSIZ+2],AX     ; 読み込むサイズの上位ワードを設定
+	PUSH	ES                      ; ESをスタックにプッシュ
+	PUSH	DI                      ; DIをスタックにプッシュ
+	CALL	STORADR                 ; 読み込み先アドレスを設定
+	CALL	CALLIO                  ; I/O呼び出しを実行（BPBを読み込み）
+	INC	BX                      ; ディスクインデックスをインクリメント
+	ADD	DI,SIZE DBP             ; 次の格納先アドレスへ移動
+	CMP	[IOAREA.IOBUF+0],AX     ; 結果が0か比較
+	JNE	LOAD_INITBPBS           ; 0でなければ次のディスクへ
+	MOV	AL,'E'                  ; ALに'E'を設定
+	PUSHF                       ; フラグレジスタをプッシュ
+	PUSH	CS                      ; CSをプッシュ
+	CALL	INT29H                  ; コンソール出力割り込みを呼び出し
+HLTLOOP:                            ;
+	HLT                         ; CPUを停止
+	JMP	HLTLOOP                 ; 無限ループ
+LOAD_INITBPBS_DONE:                 ;
+
+	;; CON SPECIAL support
+	ASSUME	DS:NOTHING,ES:NOTHING   ; DS, ESの前提条件をクリア
+	XOR	AX,AX                   ; AXをゼロクリア
+	MOV	DS,AX                   ; DSを0に設定（割り込みベクタテーブルにアクセスするため）
+	MOV	WORD PTR DS:[29H*4+0],OFFSET INT29H ; INT 29HのベクタをINT29Hハンドラに設定
+	MOV	WORD PTR DS:[29H*4+2],ES ; INT 29Hハンドラのセグメントを設定
+
+	MOV	AX,CS                   ; AXに現在のコードセグメントを設定
+	SUB	AX,CODE                 ; コードセグメントのベースからのオフセットを計算
+	ADD	AX,SEG SYSINIT          ; SYSINITのセグメントを加算
+        MOV     DS,AX               ; DSをSYSINITのセグメントに設定
+ASSUME  DS:SEG SYSINIT              ; DSがSYSINITセグメントを指すことを前提とする
+
+	MOV	CS:[IOAREA.IODEV],'IN'  ; デバイスを「Init」に設定
+	MOV	CS:[IOAREA.IOCMD],'RA'  ; コマンドを「RAM size」に設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行（RAMサイズを問い合わせ）
+	MOV	AX,CS:[IOAREA.IOBUF+0]  ; RAMサイズの下位ワードを取得
+	MOV	DX,CS:[IOAREA.IOBUF+2]  ; RAMサイズの上位ワードを取得
+	MOV	CX,16                   ; 16で割る準備
+	DIV	CX                      ; パラグラフ単位に変換
+        MOV     DS:[MEMORY_SIZE],AX     ; メモリサイズをSYSINITの変数に保存
+
+	MOV	CS:[IOAREA.IODEV],'IN'  ; デバイスを「Init」に設定
+	MOV	CS:[IOAREA.IOCMD],'DO'  ; コマンドを「DOS location」に設定
+	CALL	CALLIO0                 ; I/O呼び出しを実行（DOSの現在位置を問い合わせ）
+	MOV	AX,CS:[IOAREA.IOBUF]    ; DOSの現在位置を取得
+        MOV     DS:[CURRENT_DOS_LOCATION],AX ; DOSの現在位置をSYSINITの変数に保存
+
+ENDADDR	LABEL	MOVIMM              ; ENDADDRラベル（MOV AX, imm）
+	MOV	AX,0                    ; AXを0に設定
+	ADD	AX,OFFSET INITTAB+15    ; 初期化コードの終端アドレスに15を加算
+	MOV	CL,4                    ; 4で割る準備
+	SHR	AX,CL                   ; 16で割り、パラグラフ単位に変換
+	ADD	AX,CODE                 ; コードセグメントのベースアドレスを加算
+        MOV     DS:[FINAL_DOS_LOCATION],AX ; DOSの最終配置位置をSYSINITの変数に保存
+
+        MOV     WORD PTR DS:[DEVICE_LIST+2],CODE ; デバイスリストのセグメントをCODEに設定
+        MOV     WORD PTR DS:[DEVICE_LIST],OFFSET DEVSTART ; デバイスリストのオフセットを設定
+
+	MOV	AX,OFFSET SYSINIT       ; AXにSYSINITのオフセットを設定
+	PUSH	DS                      ; DSをスタックにプッシュ
+	PUSH	AX                      ; AXをスタックにプッシュ
+GOTO	PROC	FAR                 ; GOTOプロシージャ（SYSINITへのジャンプ用）
+	RET                         ; スタックの値にリターン（SYSINITを実行）
+GOTO	ENDP                        ; GOTOプロシージャを終了
+
+CODE    ENDS                        ; CODEセグメントを終了
+
+        END                         ; アセンブリ終了

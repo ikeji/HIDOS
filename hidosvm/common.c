@@ -239,10 +239,10 @@ load_file (uint8_t *filename, uint32_t addr, int showerr)
 int
 load (void)
 {
-  memset (&mem[0x11000], 0, 0xFFFF);
-  msdos_addr = load_file ((uint8_t *)"VM_IO   SYS", 0x11000, 0);
+  memset (&mem[0x10000], 0, 0xFFFF);
+  msdos_addr = load_file ((uint8_t *)"VM_IO   SYS", 0x10000, 0);
   if (!msdos_addr)
-    msdos_addr = load_file ((uint8_t *)"IO      SYS", 0x11000, 1);
+    msdos_addr = load_file ((uint8_t *)"IO      SYS", 0x10000, 1);
   if (!msdos_addr)
     return -1;
   if (!load_file ((uint8_t *)"MSDOS   SYS", msdos_addr, 1))
@@ -612,11 +612,11 @@ set_memory (void *m, uint32_t ramsize)
   ram_size = ramsize;
   mem[0xffff0] = 0xe6;		/* OUT 80H,AL */
   mem[0xffff1] = 0x80;
-  mem[0xffff2] = 0xea;		/* JMP 1100H:0000H */
+  mem[0xffff2] = 0xea;		/* JMP 1000H:0000H */
   mem[0xffff3] = 0;
   mem[0xffff4] = 0;
   mem[0xffff5] = 0;
-  mem[0xffff6] = 0x11;
+  mem[0xffff6] = 0x10;
   mem[0xffff7] = 0xe7;		/* OUT 86H,AX */
   mem[0xffff8] = 0x86;
   mem[0xffff9] = 0xcf;		/* IRET */

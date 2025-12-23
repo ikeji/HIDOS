@@ -52,30 +52,51 @@ static struct timespec *diskmtim;
 static uint32_t msdos_addr;
 static uint32_t ram_size;
 
+/*
+ * sttycooked - 端末をcookedモードに戻す
+ */
 static void
 sttycooked (void)
 {
   system ("stty cooked echo");
 }
 
+/*
+ * sttyraw - 端末をrawモードに設定する
+ */
 static void
 sttyraw (void)
 {
   system ("stty -cooked -echo");
 }
 
+/*
+ * memp - 指定されたアドレスのメモリポインタを返す
+ * @addr: メモリアドレス
+ * @return: メモリへのポインタ
+ */
 static uint8_t *
 memp (uint32_t addr)
 {
   return &mem[addr & (MEMSIZE8086 - 1)];
 }
 
+/*
+ * memr - 指定されたアドレスから1バイト読み込む
+ * @addr: メモリアドレス
+ * @return: 読み込んだ値
+ */
 unsigned
 memr (uint32_t addr)
 {
   return *memp (addr);
 }
 
+/*
+ * memw - 指定されたアドレスに1バイト書き込む
+ * @addr: メモリアドレス
+ * @value: 書き込む値
+ */
 void
 memw (uint32_t addr, unsigned value)
 {
@@ -84,18 +105,33 @@ memw (uint32_t addr, unsigned value)
     *p = value;
 }
 
+/*
+ * memr2 - 指定されたアドレスから2バイト（ワード）読み込む
+ * @addr: メモリアドレス
+ * @return: 読み込んだ値
+ */
 unsigned
 memr2 (uint32_t addr)
 {
   return memr (addr) | memr (addr + 1) << 8;
 }
 
+/*
+ * memr4 - 指定されたアドレスから4バイト（ダブルワード）読み込む
+ * @addr: メモリアドレス
+ * @return: 読み込んだ値
+ */
 uint32_t
 memr4 (uint32_t addr)
 {
   return memr2 (addr) | memr2 (addr + 2) << 16;
 }
 
+/*
+ * memw2 - 指定されたアドレスに2バイト（ワード）書き込む
+ * @addr: メモリアドレス
+ * @value: 書き込む値
+ */
 void
 memw2 (uint32_t addr, unsigned value)
 {
@@ -103,6 +139,11 @@ memw2 (uint32_t addr, unsigned value)
   memw (addr + 1, value >> 8);
 }
 
+/*
+ * memw4 - 指定されたアドレスに4バイト（ダブルワード）書き込む
+ * @addr: メモリアドレス
+ * @value: 書き込む値
+ */
 void
 memw4 (uint32_t addr, uint32_t value)
 {
@@ -110,6 +151,11 @@ memw4 (uint32_t addr, uint32_t value)
   memw2 (addr + 2, value >> 16);
 }
 
+/*
+ * diskch - ディスクのメディアが変更されたか確認する
+ * @drive: ドライブ番号
+ * @return: 変更があれば~0、なければ1、エラー時は0
+ */
 static unsigned
 diskch (int drive)
 {
@@ -132,6 +178,15 @@ diskch (int drive)
   return ~0;
 }
 
+/*
+ * diskrw - ディスクイメージに対して読み書きを行う
+ * @drive: ドライブ番号
+ * @wr: 書き込みの場合は1, 読み込みの場合は0
+ * @addr: 読み書きするVMのメモリアドレス
+ * @off: ディスクイメージ内のオフセット
+ * @len: 読み書きする長さ
+ * @return: 成功すれば0、失敗すれば-1
+ */
 static int
 diskrw (int drive, int wr, uint32_t addr, uint32_t off, uint32_t len)
 {
@@ -191,6 +246,26 @@ diskrw (int drive, int wr, uint32_t addr, uint32_t off, uint32_t len)
   return ret;
 }
 
+/*
+ * load_file - FAT12ファイルシステムからファイルを読み込む
+ *
+ * この関数は、仮想ディスクからファイルをクラスタ単位で読み込みます。
+ * 読み込む合計サイズは、常にクラスタサイズの倍数になります。
+ * 例えば、ファイルの実際のサイズが3297バイトであっても、
+ * ディスクのクラスタサイズが32768バイト（32KB）である場合、
+ * 関数はファイルが占有する1クラスタ全体（32KB）を読み込みます。
+ *
+ * 返り値は、ファイルを読み込んだ後の次のメモリアドレスです。
+ * もしファイルをアドレス0から読み込み始めた場合、返り値は読み込んだ合計バイト数と
+ * 等しくなります。3297バイトのファイルを読み込んで返り値が32768になったのは、
+ * クラスタサイズが32768バイトであり、関数がそのクラスタ全体を
+ * 読み込んだためです。
+ *
+ * @filename: 読み込むファイル名（8.3形式）
+ * @addr: ファイルを読み込むVMのメモリアドレス
+ * @showerr: エラーメッセージを表示する場合は1
+ * @return: 読み込み後の次のメモリアドレス。失敗した場合は0。
+ */
 static uint32_t
 load_file (uint8_t *filename, uint32_t addr, int showerr)
 {
@@ -236,6 +311,10 @@ load_file (uint8_t *filename, uint32_t addr, int showerr)
   return addr;
 }
 
+/*
+ * load - OS（IO.SYSとMSDOS.SYS）をメモリに読み込む
+ * @return: 成功すれば0、失敗すれば-1
+ */
 int
 load (void)
 {
@@ -255,6 +334,13 @@ load (void)
   return 0;
 }
 
+/*
+ * io_init - 'IN'（初期化）デバイスのI/O処理
+ * @addr: I/Oパラメータブロックのアドレス
+ * @idx: デバイスインデックス (未使用)
+ * @cmd: コマンド
+ * @return: 成功すれば0、失敗すれば-1
+ */
 static int
 io_init (unsigned addr, unsigned idx, unsigned cmd)
 {
@@ -277,6 +363,13 @@ io_init (unsigned addr, unsigned idx, unsigned cmd)
   return 0;
 }
 
+/*
+ * io_disk - 'DI'（ディスク）デバイスのI/O処理
+ * @addr: I/Oパラメータブロックのアドレス
+ * @idx: ドライブ番号
+ * @cmd: コマンド ('RD', 'WR', 'CH')
+ * @return: 成功すれば0、失敗すれば-1
+ */
 static int
 io_disk (unsigned addr, unsigned idx, unsigned cmd)
 {
@@ -308,6 +401,15 @@ io_disk (unsigned addr, unsigned idx, unsigned cmd)
   return 0;
 }
 
+/*
+ * conin - コンソールから1文字入力する
+ *
+ * `~.` のシーケンスを検知して終了する機能や、
+ * `~~` を `~` に変換するエスケープ処理を持つ。
+ *
+ * @in: 文字を格納するポインタ。NULLでない場合、文字を読み込む。
+ * @return: 1:文字あり, 0:文字なし, -1:エラー, -2:終了
+ */
 int
 conin (uint16_t *in)
 {
@@ -365,6 +467,13 @@ conin (uint16_t *in)
   return 1;
 }
 
+/*
+ * io_con - 'CO'（コンソール）デバイスのI/O処理
+ * @addr: I/Oパラメータブロックのアドレス
+ * @idx: デバイスインデックス (未使用)
+ * @cmd: コマンド ('W1', 'WR', 'RP', 'R1', 'RW')
+ * @return: 成功すれば0、失敗すれば-1、終了時は-2
+ */
 static int
 io_con (unsigned addr, unsigned idx, unsigned cmd)
 {
@@ -429,6 +538,13 @@ io_con (unsigned addr, unsigned idx, unsigned cmd)
   return 0;
 }
 
+/*
+ * io_aux - 'AU'（補助）デバイスのI/O処理（スタブ）
+ * @addr: I/Oパラメータブロックのアドレス
+ * @idx: デバイスインデックス (未使用)
+ * @cmd: コマンド
+ * @return: 成功すれば0、失敗すれば-1
+ */
 static int
 io_aux (unsigned addr, unsigned idx, unsigned cmd)
 {
@@ -451,6 +567,13 @@ io_aux (unsigned addr, unsigned idx, unsigned cmd)
   return 0;
 }
 
+/*
+ * io_clock - 'CL'（時計）デバイスのI/O処理
+ * @addr: I/Oパラメータブロックのアドレス
+ * @idx: デバイスインデックス (未使用)
+ * @cmd: コマンド ('RD', 'WR')
+ * @return: 成功すれば0、失敗すれば-1
+ */
 static int
 io_clock (unsigned addr, unsigned idx, unsigned cmd)
 {
@@ -502,6 +625,13 @@ io_clock (unsigned addr, unsigned idx, unsigned cmd)
   return 0;
 }
 
+/*
+ * io_printer - 'PR'（プリンタ）デバイスのI/O処理（スタブ）
+ * @addr: I/Oパラメータブロックのアドレス
+ * @idx: デバイスインデックス (未使用)
+ * @cmd: コマンド
+ * @return: 成功すれば0、失敗すれば-1
+ */
 static int
 io_printer (unsigned addr, unsigned idx, unsigned cmd)
 {
@@ -524,6 +654,11 @@ io_printer (unsigned addr, unsigned idx, unsigned cmd)
   return 0;
 }
 
+/*
+ * vmio - VMのI/Oリクエストを処理するディスパッチャ
+ * @addr: I/Oパラメータブロックのアドレス
+ * @return: 各I/Oハンドラの返り値
+ */
 int
 vmio (unsigned addr)
 {
@@ -559,6 +694,15 @@ vmio (unsigned addr)
   return ret;
 }
 
+/*
+ * init_common - 共通コンポーネントを初期化する
+ *
+ * 主にコマンドライン引数で渡されたディスクイメージを開き、
+ *ディスク関連のデータ構造をセットアップする。
+ *
+ * @argc: コマンドライン引数の数
+ * @argv: コマンドライン引数の配列
+ */
 void
 init_common (int argc, char **argv)
 {
@@ -605,6 +749,11 @@ init_common (int argc, char **argv)
     }
 }
 
+/*
+ * set_memory - VMのメモリをセットアップする
+ * @m: VMのメモリ領域へのポインタ
+ * @ramsize: VMのRAMサイズ
+ */
 void
 set_memory (void *m, uint32_t ramsize)
 {

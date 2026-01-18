@@ -806,9 +806,7 @@ INITTAB	LABEL	WORD
 	ASSUME	DS:NOTHING
 
 HWINIT:
-	MOV	AX,7000H
-	MOV	SS,AX
-	MOV	SP,0
+	;; Copy drivers to final location.
 	CLD
 	ASSUME	DS:CODE,ES:CODE
 	MOV	AX,CODE
@@ -819,7 +817,9 @@ HWINIT:
 	XOR	DI,DI
 	MOV	CX,OFFSET INITTAB
 	REP	MOVSB
-SEGOK:
+	;; Use the source driver area as a temporary stack.
+	MOV	SS,AX
+	MOV	SP,SI
 	;; Scan drives
 	MOV	[IOAREA.IODEV],'IN'
 	MOV	[IOAREA.IOCMD],'DI'

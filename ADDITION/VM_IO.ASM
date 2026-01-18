@@ -828,6 +828,10 @@ SEGOK:
 	MOV	ES:[DSKNUNT.IMM],AX
 	XCHG	AX,CX
 	PUSH	CX
+	;; Memory usage at CODE:INITTAB is like:
+	;; DPB_POINTER_ARRAY	DW	DSKNUNT DUP (?)
+	;; DBP_ARRAY		DBP	DSKNUNT DUP (?)
+	;; DPB is at offset 11 of DBP structure.
 	MOV	DI,OFFSET INITTAB
 	LEA	AX,[DI+11]
 	ADD	AX,CX

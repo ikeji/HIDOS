@@ -286,6 +286,11 @@ load (void)
       fprintf (stderr, "Error while reading MSDOS.SYS\r\n");
       return -1;
     }
+  if (ram_size < msdos_endaddr)
+    {
+      fprintf (stderr, "RAM size too small\r\n");
+      return -1;
+    }
   /* Set interrupt vector */
   mem[0x86 * 4 + 0] = 0x7;	/* INT 86H handler FFFFH:0007H */
   mem[0x86 * 4 + 1] = 0x0;

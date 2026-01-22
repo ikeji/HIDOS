@@ -37,6 +37,13 @@
 #include <linux/kvm.h>
 #include "common.h"
 
+#ifndef RAMSIZE
+#define RAMSIZE 0xff000
+#endif
+#define ROMADDR 0xff000
+#define DUPROMADDR 0xfffff000
+#define ROMSIZE 0x1000
+
 int
 main (int argc, char **argv)
 {
@@ -77,15 +84,15 @@ main (int argc, char **argv)
 	.slot = 0,
 	.flags = 0,
 	.guest_phys_addr = 0,
-	.memory_size = 0xff000,
+	.memory_size = RAMSIZE,
 	.userspace_addr = (uintptr_t)mem,
       },
       {
 	.slot = 1,
 	.flags = KVM_MEM_READONLY,
-	.guest_phys_addr = 0xff000,
-	.memory_size = 0x1000,
-	.userspace_addr = (uintptr_t)mem + 0xff000,
+	.guest_phys_addr = ROMADDR,
+	.memory_size = ROMSIZE,
+	.userspace_addr = (uintptr_t)mem + ROMADDR,
       },
       {
 	.slot = 2,
@@ -97,9 +104,9 @@ main (int argc, char **argv)
       {
 	.slot = 3,
 	.flags = KVM_MEM_READONLY,
-	.guest_phys_addr = 0xfffff000,
-	.memory_size = 0x1000,
-	.userspace_addr = (uintptr_t)mem + 0xff000,
+	.guest_phys_addr = DUPROMADDR,
+	.memory_size = ROMSIZE,
+	.userspace_addr = (uintptr_t)mem + ROMADDR,
       },
     };
   for (int i = 0; i < sizeof memregion / sizeof memregion[0]; i++)
@@ -130,7 +137,7 @@ main (int argc, char **argv)
       perror ("mmap vcpu");
       exit (EXIT_FAILURE);
     }
-  set_memory (mem, 0xff000);
+  set_memory (mem, RAMSIZE);
   for (;;)
     {
       if (ioctl (vcpufd, KVM_RUN, 0))

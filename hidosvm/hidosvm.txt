@@ -76,6 +76,10 @@ Memory address space:
   FFFF0H-FFFFFH  Read only memory (ROM)
   * ROM for hidoskvm
 
+  RAM size can be changed when compiling using RAMSIZE macro.  The RAM
+  size must be a multiple of 0x10 bytes for hidosvm, and a multiple of
+  0x1000 bytes for hidoskvm.
+
 Hardware interrupts:
 
   Nothing

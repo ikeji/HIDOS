@@ -35,6 +35,15 @@
 #include <unistd.h>
 #include "common.h"
 
+/* VM_IO.SYS CODE segment is 0x40.  VM_IO.SYS is loaded at LOADSEG
+   segment and it moves its driver code to 0x40 segment.  It needs
+   additional memory space following the driver code in the 0x40
+   segment for storing drive information, which will be about 800
+   bytes if 26 drives are used.  Therefore, LOADADDR must be more than
+   0x400 + driver code size + drive information size. */
+#define LOADSEG 0x200
+#define LOADADDR (LOADSEG << 4)
+
 enum
   {
     IODEV = 0,
@@ -192,10 +201,46 @@ diskrw (int drive, int wr, uint32_t addr, uint32_t off, uint32_t len)
 }
 
 static uint32_t
-load_file (uint8_t *filename, uint32_t addr, int showerr)
+find_1st_cluster (int nrdir, uint8_t *filename)
 {
+  for (int i = 0; i < nrdir; i++)
+    {
+      if (!memcmp (memp (32 * i), filename, 11))
+	return memr2 (32 * i + 0x1a);
+      if (!memr (32 * i))
+	break;
+    }
+  return 0;
+}
+
+static uint32_t
+load_file (uint32_t cluster, int secsiz, int nseccls, int nsecres,
+	   int data_start, uint32_t addr)
+{
+  do
+    {
+      if (diskrw (0, 0, addr, secsiz * (data_start + nseccls * (cluster - 2)),
+		  secsiz * nseccls))
+	return 0;
+      addr += secsiz * nseccls;
+      if (diskrw (0, 0, addr, secsiz * nsecres + (cluster / 2) * 3, 3))
+	return 0;
+      if (cluster % 2)
+	cluster = memr2 (addr + 1) >> 4;
+      else
+	cluster = memr2 (addr + 0) & 0xfff;
+    }
+  while (cluster < 0xff0);
+  return addr;
+}
+
+int
+load (void)
+{
+  /* Read first sector to address 0 */
   if (diskrw (0, 0, 0, 0, 512))
-    return 0;
+    return -1;
+  /* Get parameters */
   int secsiz = memr2 (11);
   int nseccls = memr (13);
   int nsecres = memr2 (14);
@@ -204,50 +249,44 @@ load_file (uint8_t *filename, uint32_t addr, int showerr)
   int nsecfat = memr2 (22);
   int root_start = nsecres + nfats * nsecfat;
   int data_start = root_start + (32 * nrdir + secsiz - 1) / secsiz;
+  /* Read root directory entries to address 0 */
   if (diskrw (0, 0, 0, secsiz * root_start, 32 * nrdir))
-    return 0;
-  uint32_t cluster;
-  for (int i = 0; i < nrdir; i++)
+    return -1;
+  /* Find files */
+  uint32_t iosys_cluster;
+  uint32_t msdos_cluster;
+  iosys_cluster = find_1st_cluster (nrdir, (uint8_t *)"VM_IO   SYS");
+  if (!iosys_cluster)
+    iosys_cluster = find_1st_cluster (nrdir, (uint8_t *)"IO      SYS");
+  if (!iosys_cluster)
     {
-      if (!memcmp (memp (32 * i), filename, 11))
-	{
-	  cluster = memr2 (32 * i + 0x1a);
-	  goto found;
-	}
-      if (!memr (32 * i))
-	break;
+      fprintf (stderr, "VM_IO.SYS and IO.SYS not found\r\n");
+      return -1;
     }
-  if (showerr)
-    fprintf (stderr, "\"%s\" not found\r\n", filename);
-  return 0;
- found:
-  if (diskrw (0, 0, addr, secsiz * (data_start + nseccls * (cluster - 2)),
-	      secsiz * nseccls))
-    return 0;
-  addr += secsiz * nseccls;
-  if (diskrw (0, 0, 0, secsiz * nsecres + (cluster / 2) * 3, 3))
-    return 0;
-  if (cluster % 2)
-    cluster = memr2 (1) >> 4;
-  else
-    cluster = memr2 (0) & 0xfff;
-  if (cluster < 0xff0)
-    goto found;
-  return addr;
-}
-
-int
-load (void)
-{
-  memset (&mem[0x80000], 0, 0x7fff0);
-  msdos_addr = load_file ((uint8_t *)"VM_IO   SYS", 0x80000, 0);
+  msdos_cluster = find_1st_cluster (nrdir, (uint8_t *)"MSDOS   SYS");
+  if (!msdos_cluster)
+    {
+      fprintf (stderr, "MSDOS.SYS not found\r\n");
+      return -1;
+    }
+  /* Clear RAM */
+  memset (&mem[0], 0, ram_size);
+  /* Load files */
+  msdos_addr = load_file (iosys_cluster, secsiz, nseccls, nsecres, data_start,
+			  LOADADDR);
   if (!msdos_addr)
-    msdos_addr = load_file ((uint8_t *)"IO      SYS", 0x80000, 1);
-  if (!msdos_addr)
-    return -1;
-  if (!load_file ((uint8_t *)"MSDOS   SYS", msdos_addr, 1))
-    return -1;
-  memset (&mem[0], 0, 0x80000);
+    {
+      fprintf (stderr, "Error while reading VM_IO.SYS or IO.SYS\r\n");
+      return -1;
+    }
+  uint32_t msdos_endaddr = load_file (msdos_cluster, secsiz, nseccls, nsecres,
+				      data_start, msdos_addr);
+  if (!msdos_endaddr)
+    {
+      fprintf (stderr, "Error while reading MSDOS.SYS\r\n");
+      return -1;
+    }
+  /* Set interrupt vector */
   mem[0x86 * 4 + 0] = 0x7;	/* INT 86H handler FFFFH:0007H */
   mem[0x86 * 4 + 1] = 0x0;
   mem[0x86 * 4 + 2] = 0xff;
@@ -610,11 +649,11 @@ set_memory (void *m, uint32_t ramsize)
   ram_size = ramsize;
   mem[0xffff0] = 0xe6;		/* OUT 80H,AL */
   mem[0xffff1] = 0x80;
-  mem[0xffff2] = 0xea;		/* JMP 8000H:0000H */
+  mem[0xffff2] = 0xea;		/* JMP LOADSEG:0000H */
   mem[0xffff3] = 0;
   mem[0xffff4] = 0;
-  mem[0xffff5] = 0;
-  mem[0xffff6] = 0x80;
+  mem[0xffff5] = LOADSEG & 0xff;
+  mem[0xffff6] = LOADSEG >> 8;
   mem[0xffff7] = 0xe7;		/* OUT 86H,AX */
   mem[0xffff8] = 0x86;
   mem[0xffff9] = 0xcf;		/* IRET */

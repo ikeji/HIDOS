@@ -1,6 +1,8 @@
-run:
+dos:
 	make -C cross
 	make -C BUILD -f ../cross/crossmakefile all
+
+run: dos
 	make -C hidosvm run
 
 clean:

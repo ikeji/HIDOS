@@ -6,3 +6,4 @@ BUILD/NUL.MAP
 BUILD/*.COM
 hidosvm/disk1
 hidosvm/hidosvm
+hidosvm/hidoskvm

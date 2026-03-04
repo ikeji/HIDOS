@@ -7,10 +7,15 @@ hidoskvm : hidoskvm.c common.c common.h
 run: hidosvm disk1
 	./hidosvm disk1
 
-disk1: ../BUILD/BIN/*
+run-kvm: hidoskvm disk1
+	./hidoskvm disk1
+
+disk1: ../BUILD/BIN/* files/*
 	dd if=/dev/zero of=disk1 bs=4096 count=16384
 	/sbin/mkfs.fat -S 4096 -F 12 disk1
 	mcopy -i disk1 ../BUILD/BIN/* ::
+	mkdir -p files
+	cd files; mcopy -s -i ../disk1 * ::
 
 clean:
 	rm -f hidosvm hidoskvm disk1
